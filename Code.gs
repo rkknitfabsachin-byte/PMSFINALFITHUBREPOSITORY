@@ -1688,8 +1688,8 @@ function recalculateItem_(piItemId) {
   const orderedQty = toNumber_(item.ordered_qty);
   const plannedQty = toNumber_(item.planned_qty);
   
-  // We no longer calculate individual Kora (producedQty = 0)
-  const producedQty = 0; 
+  const fabricGroupProgress = getFabricGroupProgress_(item);
+  const producedQty = fabricGroupProgress.itemGreigeQty;
   
   const dyeingSentQty = dyeingLots.reduce(function (total, lot) {
     return total + toNumber_(lot.sent_weight || lot.sent_qty);
@@ -1702,10 +1702,10 @@ function recalculateItem_(piItemId) {
 
   updateObjectAtRow_(itemSheet, itemRow, {
     planned_qty: plannedQty,
-    greige_produced_qty: producedQty, // Always 0 to avoid misleading "individual Kora" display
+    greige_produced_qty: producedQty,
     dyeing_sent_qty: dyeingSentQty,
     dyeing_received_qty: dyeingReceivedQty,
-    production_balance: orderedQty, // We don't deduct Kora here anymore
+    production_balance: Math.max(orderedQty - producedQty, 0),
     dyeing_balance: Math.max(dyeingSentQty - dyeingReceivedQty, 0),
     final_balance: Math.max(orderedQty - dyeingReceivedQty, 0),
     status: nextStatus,
@@ -1731,10 +1731,12 @@ function getFabricGroupProgress_(item) {
       return total + toNumber_(lot.weight_qty);
     }, 0);
 
+  const ratio = groupOrderedQty > 0 ? Math.min(greigeQty / groupOrderedQty, 1) : 0;
+
   return {
     groupOrderedQty: groupOrderedQty,
     groupGreigeQty: greigeQty,
-    itemGreigeQty: 0, // Obsolete, individual items don't track Kora
+    itemGreigeQty: Math.min(toNumber_(item.ordered_qty), toNumber_(item.ordered_qty) * ratio),
   };
 }
 
@@ -2143,7 +2145,7 @@ function syncFinalDashboard_() {
   items.forEach(function(item) {
     const pi = pis.find(function(p) { return p.pi_id === item.pi_id; }) || {};
     const itemGreige = greigeLots.filter(function(l) { 
-      return l.pi_id === item.pi_id || (l.pi_no && item.pi_no && String(l.pi_no).trim() === String(item.pi_no).trim());
+      return isSameFabricGroup_(l, item);
     });
     const itemDyeing = dyeingLots.filter(function(l) { return l.pi_item_id === item.pi_item_id; });
     

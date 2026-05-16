@@ -1,4 +1,4 @@
-const API_PATH = '/api/pms';
+﻿const API_PATH = '/api/pms';
 const CACHE_KEY = 'pms-cache-v1';
 
 const SHEET_NAMES = [
@@ -108,7 +108,7 @@ function bindEvents() {
 
   document.getElementById('orderSearch').addEventListener('input', renderOrders);
   document.getElementById('statusFilter').addEventListener('change', renderOrders);
-
+  document.getElementById('colourFilter').addEventListener('input', renderOrders);
 
 
   document.getElementById('masterForm').addEventListener('submit', handleMasterSubmit);
@@ -318,12 +318,13 @@ function renderKoraAvailability() {
     
     groups[key].total += weight;
     groups[key].sent += sent;
+    groups[key].available = (groups[key].available || 0) + bal;
     if (lot.pi_no) groups[key].pi_nos[lot.pi_no] = true;
   });
 
   const list = Object.keys(groups).map(function(key) {
     const g = groups[key];
-    const available = Math.max(g.total - g.sent, 0);
+    const available = Math.max(g.available || (g.total - g.sent), 0);
     if (available <= 0) return '';
     
     return '<div class="mini-row">' +
@@ -342,7 +343,7 @@ function renderDyeingOverview() {
   lots.forEach(function(lot) {
     const key = lot.dyeing_party || 'Unknown';
     if (!groups[key]) groups[key] = { party: key, weight: 0, count: 0, qualities: {} };
-    groups[key].weight += number(lot.sent_weight);
+    groups[key].weight += Math.max(number(lot.sent_weight) - number(lot.received_weight), 0);
     groups[key].count += 1;
     if (lot.fabric_name) groups[key].qualities[lot.fabric_name] = true;
   });
@@ -427,12 +428,12 @@ function renderStatusStack() {
 
 function renderPipeline(items) {
   var stages = [
-    { key: 'New', label: 'New', icon: '○' },
-    { key: 'Planned', label: 'Planned', icon: '◐' },
-    { key: 'Kora Received', label: 'Kora', icon: '◧' },
-    { key: 'In Dyeing', label: 'Dyeing', icon: '◑' },
-    { key: 'Part Received', label: 'Part Rcvd', icon: '◕' },
-    { key: 'Completed', label: 'Done', icon: '●' },
+    { key: 'New', label: 'New', icon: '1' },
+    { key: 'Planned', label: 'Planned', icon: '2' },
+    { key: 'Kora Received', label: 'Kora', icon: '3' },
+    { key: 'In Dyeing', label: 'Dyeing', icon: '4' },
+    { key: 'Part Received', label: 'Part Rcvd', icon: '5' },
+    { key: 'Completed', label: 'Done', icon: '6' },
   ];
   var counts = groupCount(items, 'status');
   var total = Math.max(items.length, 1);
@@ -446,11 +447,9 @@ function renderPipeline(items) {
         '<div class="pipeline-count">' + count + '</div>' +
         '<div class="pipeline-label">' + stage.label + '</div>' +
         '<div class="pipeline-bar"><span style="width:' + pct + '%"></span></div>' +
-      '</div>' + (i < stages.length - 1 ? '<div class="pipeline-arrow">→</div>' : '');
+      '</div>' + (i < stages.length - 1 ? '<div class="pipeline-arrow">-&gt;</div>' : '');
     }).join('') + '</div>';
 }
-
-
 
 function renderOrders() {
   const search = document.getElementById('orderSearch').value.trim().toLowerCase();
@@ -480,8 +479,8 @@ function renderOrders() {
 
   if (!state.selectedPiId && pis[0]) {
     state.selectedPiId = pis[0].pi_id;
-    renderMasters();
   }
+  renderPiDetail();
 }
 
 function renderPiRow(pi) {
@@ -520,7 +519,7 @@ function renderPiDetail() {
     filteredItems = items.filter(function(i) { return i.colour === state.detailColourFilter; });
   }
 
-  if (!state.selectedItemId && filteredItems[0]) {
+  if ((!state.selectedItemId || !filteredItems.some(function (item) { return item.pi_item_id === state.selectedItemId; })) && filteredItems[0]) {
     state.selectedItemId = filteredItems[0].pi_item_id;
   }
   var selectedItem = filteredItems.find(function (item) {
@@ -585,12 +584,12 @@ function renderGroupedItems(groups) {
     return '<div class="fabric-group">' +
       '<button class="fabric-group-header" type="button" data-toggle-group="' + escapeAttr(group.key) + '">' +
         '<div class="fg-left">' +
-          '<span class="fg-chevron' + (isExpanded ? ' is-open' : '') + '">▸</span>' +
+          '<span class="fg-chevron' + (isExpanded ? ' is-open' : '') + '">></span>' +
           '<div><strong>' + escapeHtml(group.fabric_name) + '</strong>' +
             '<span class="fg-meta">' + group.items.length + ' colour' + (group.items.length > 1 ? 's' : '') +
-            ' · ' + formatNumber(totalOrdered) + ' total' +
-            (group.gsm ? ' · GSM ' + escapeHtml(group.gsm) : '') +
-            (group.width ? ' · ' + escapeHtml(group.width) : '') + '</span></div>' +
+            '  |  ' + formatNumber(totalOrdered) + ' total' +
+            (group.gsm ? '  |  GSM ' + escapeHtml(group.gsm) : '') +
+            (group.width ? '  |  ' + escapeHtml(group.width) : '') + '</span></div>' +
         '</div>' +
         '<div class="fg-right">' +
           '<div class="fg-progress"><div class="prog-track"><div class="prog-fill final" style="width:' + pct + '%"></div></div></div>' +
@@ -735,7 +734,7 @@ function renderDyeingForm(item) {
       return sum + bal;
     }, 0);
     
-    return '<div class="item-dyeing-row" style="border-top:1px solid var(--border-color); padding-top:12px; margin-top:12px;">' +
+    return '<div class="item-dyeing-row" style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">' +
       '<h4>' + escapeHtml(cItem.fabric_name) + ' <span class="muted">(' + formatNumber(cItem.ordered_qty) + ' ' + escapeHtml(cItem.unit || 'Kg') + ')</span></h4>' +
       '<p class="muted" style="margin:0">Available Kora: ' + formatNumber(availableKora) + '</p>' +
       '<input type="hidden" name="pi_item_id_' + index + '" value="' + escapeAttr(cItem.pi_item_id) + '">' +
@@ -760,8 +759,10 @@ function renderDyeingForm(item) {
     '<div class="form-grid">' +
       '<label><span>Dyeing House</span><select name="dyeing_party"><option value="">Select</option>' + dyeingHouses + '</select></label>' +
       '<label><span>Sent Date</span><input name="sent_date" type="date" value="' + todayIso() + '"></label>' +
+      '<label><span>Received Date</span><input name="received_date" type="date"></label>' +
       '<label><span>Process</span><select name="process_type"><option value="">Select</option>' + processes + '</select></label>' +
       '<label><span>Addons</span><input name="addons" placeholder="' + escapeAttr(addons || 'Silicon') + '"></label>' +
+      '<label><span>Remarks</span><input name="remarks" placeholder="Optional"></label>' +
     '</div>' +
     itemsHtml +
     '<button class="primary-button" style="margin-top:16px" type="submit">Assign Dyeing Lots</button>' +
@@ -1049,7 +1050,7 @@ function getYarns(piItemId) {
 
 function getFabricGroupItems(item) {
   return rows('PI_Items').filter(function (record) {
-    return isSameFabricGroup(record, item);
+    return String(record.pi_id) === String(item.pi_id) && isSameFabricGroup(record, item);
   });
 }
 
@@ -1197,3 +1198,4 @@ function registerServiceWorker() {
     });
   }
 }
+
