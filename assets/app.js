@@ -417,9 +417,9 @@ function renderStatusStack() {
   document.getElementById('statusStack').innerHTML = statuses.map(function (status) {
     const value = groups[status] || 0;
     const width = Math.round((value / max) * 100);
-    return '<div class="status-row">' +
+    return '<div class="status-stack-row">' +
       '<strong>' + escapeHtml(status) + '</strong>' +
-      '<div class="bar"><span style="width:' + width + '%"></span></div>' +
+      '<div class="prog-track"><div class="prog-fill" style="width:' + width + '%"></div></div>' +
       '<span class="muted">' + value + '</span>' +
     '</div>';
   }).join('');
@@ -480,9 +480,8 @@ function renderOrders() {
 
   if (!state.selectedPiId && pis[0]) {
     state.selectedPiId = pis[0].pi_id;
+    renderMasters();
   }
-
-  renderPiDetail();
 }
 
 function renderPiRow(pi) {
