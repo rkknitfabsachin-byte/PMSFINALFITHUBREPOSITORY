@@ -17,6 +17,7 @@ const SHEET_NAMES = [
   'Masters_JobWorkers',
   'Masters_DyeingProcesses',
   'Masters_Addons',
+  'Masters_DyeingHouses',
 ];
 
 const MASTER_FIELDS = {
@@ -73,7 +74,6 @@ const MASTER_LABELS = {
 const VIEW_TITLES = {
   dashboard: 'Dashboard',
   orders: 'Orders',
-  create: 'New PI',
   masters: 'Masters',
 };
 
@@ -93,7 +93,6 @@ document.addEventListener('DOMContentLoaded', init);
 function init() {
   bindEvents();
   renderMasterFields();
-  addItemEditor();
   restoreCache();
   renderAll();
   syncData();
@@ -110,13 +109,7 @@ function bindEvents() {
   document.getElementById('orderSearch').addEventListener('input', renderOrders);
   document.getElementById('statusFilter').addEventListener('change', renderOrders);
 
-  document.getElementById('createPiForm').addEventListener('submit', handleCreatePi);
-  document.getElementById('createPiForm').addEventListener('reset', function () {
-    setTimeout(function () {
-      document.getElementById('itemEditorList').innerHTML = '';
-      addItemEditor();
-    }, 0);
-  });
+
 
   document.getElementById('masterForm').addEventListener('submit', handleMasterSubmit);
   document.getElementById('masterType').addEventListener('change', renderMasterFields);
@@ -143,20 +136,7 @@ function handleClick(event) {
     return;
   }
 
-  if (event.target.closest('#addItemButton')) {
-    addItemEditor();
-    return;
-  }
 
-  var removeItemButton = event.target.closest('[data-remove-item]');
-  if (removeItemButton) {
-    var editor = removeItemButton.closest('[data-item-editor]');
-    if (document.querySelectorAll('[data-item-editor]').length > 1) {
-      editor.remove();
-      renumberItemEditors();
-    }
-    return;
-  }
 
   var groupToggle = event.target.closest('[data-toggle-group]');
   if (groupToggle) {
@@ -194,6 +174,12 @@ function handleClick(event) {
   if (colourChip) {
     state.detailColourFilter = colourChip.dataset.detailColour;
     renderPiDetail();
+    return;
+  }
+
+  var archiveButton = event.target.closest('[data-archive-pi]');
+  if (archiveButton) {
+    handleArchivePi(archiveButton.dataset.archivePi);
   }
 }
 
@@ -208,6 +194,22 @@ function setView(view) {
   });
 
   document.getElementById('viewTitle').textContent = VIEW_TITLES[view] || 'PMS';
+}
+
+
+
+async function handleArchivePi(piId) {
+  if (!confirm('Are you sure you want to archive this PI? It will be removed from the active view.')) return;
+  
+  showToast('Archiving...');
+  try {
+    await apiRequest('archivePi', { pi_id: piId });
+    showToast('PI Archived successfully.');
+    state.selectedPiId = '';
+    syncData(true);
+  } catch (error) {
+    showToast('Archive failed: ' + error.message);
+  }
 }
 
 async function syncData(showSuccess) {
@@ -295,9 +297,65 @@ function renderDashboard() {
   ].join('');
 
   renderPipeline(items);
-  renderPiProgressCards(pis);
   renderPriorityList(delayedItems);
   renderStatusStack();
+  renderKoraAvailability();
+  renderDyeingOverview();
+}
+
+function renderKoraAvailability() {
+  const lots = rows('Greige_Lots');
+  const groups = {};
+  
+  lots.forEach(function(lot) {
+    const key = (lot.fabric_name || 'Unknown') + ' | ' + (lot.gsm || '') + ' | ' + (lot.width || '');
+    if (!groups[key]) {
+      groups[key] = { fabric: lot.fabric_name, gsm: lot.gsm, width: lot.width, total: 0, sent: 0, pi_nos: {} };
+    }
+    const weight = number(lot.weight_qty);
+    const sent = number(lot.dyeing_sent_weight);
+    const bal = lot.balance_weight !== undefined && lot.balance_weight !== '' ? number(lot.balance_weight) : Math.max(weight - sent, 0);
+    
+    groups[key].total += weight;
+    groups[key].sent += sent;
+    if (lot.pi_no) groups[key].pi_nos[lot.pi_no] = true;
+  });
+
+  const list = Object.keys(groups).map(function(key) {
+    const g = groups[key];
+    const available = Math.max(g.total - g.sent, 0);
+    if (available <= 0) return '';
+    
+    return '<div class="mini-row">' +
+      '<div><strong>' + escapeHtml(g.fabric) + '</strong><span class="muted">' + (g.gsm ? ' GSM ' + g.gsm : '') + '</span></div>' +
+      '<div style="text-align:right"><strong>' + formatNumber(available) + ' kg</strong><br><span class="muted">' + Object.keys(g.pi_nos).join(', ') + '</span></div>' +
+    '</div>';
+  }).join('');
+
+  document.getElementById('koraList').innerHTML = list || emptyBlock('No Kora available.', 'All Kora has been assigned to dyeing.');
+}
+
+function renderDyeingOverview() {
+  const lots = rows('Dyeing_Lots').filter(function(l) { return l.status !== 'Completed'; });
+  const groups = {};
+  
+  lots.forEach(function(lot) {
+    const key = lot.dyeing_party || 'Unknown';
+    if (!groups[key]) groups[key] = { party: key, weight: 0, count: 0, qualities: {} };
+    groups[key].weight += number(lot.sent_weight);
+    groups[key].count += 1;
+    if (lot.fabric_name) groups[key].qualities[lot.fabric_name] = true;
+  });
+
+  const list = Object.keys(groups).map(function(key) {
+    const g = groups[key];
+    return '<div class="mini-row">' +
+      '<div><strong>' + escapeHtml(g.party) + '</strong><span class="muted">' + Object.keys(g.qualities).length + ' qualities</span></div>' +
+      '<div style="text-align:right"><strong>' + formatNumber(g.weight) + ' kg</strong><br><span class="muted">' + g.count + ' lots</span></div>' +
+    '</div>';
+  }).join('');
+
+  document.getElementById('dyeingList').innerHTML = list || emptyBlock('No lots at dyeing.', 'Active dyeing lots will appear here.');
 }
 
 function renderPriorityList(delayedItems) {
@@ -392,34 +450,7 @@ function renderPipeline(items) {
     }).join('') + '</div>';
 }
 
-function renderPiProgressCards(pis) {
-  var activePis = pis.filter(function (pi) { return pi.status !== 'Completed'; });
-  var container = document.getElementById('piProgressSection');
-  if (activePis.length === 0) { container.innerHTML = ''; return; }
-  container.innerHTML =
-    '<div class="panel"><div class="panel-heading"><h2>Active Orders</h2><span class="muted">' + activePis.length + ' in progress</span></div>' +
-    '<div class="pi-progress-grid">' + activePis.slice(0, 12).map(function (pi) {
-      var piItems = getItems(pi.pi_id);
-      var ordered = sum(piItems, 'ordered_qty');
-      var received = sum(piItems, 'dyeing_received_qty');
-      var greige = sum(rows('Greige_Lots').filter(function (l) { return l.pi_id === pi.pi_id || String(l.pi_no).trim().toUpperCase() === String(pi.pi_no).trim().toUpperCase(); }), 'weight_qty');
-      var pct = ordered > 0 ? Math.round((received / ordered) * 100) : 0;
-      var gPct = ordered > 0 ? Math.round((greige / ordered) * 100) : 0;
-      var isDelayed = pi.delivery_date && pi.delivery_date < todayIso();
-      return '<button class="pi-progress-card' + (isDelayed ? ' is-delayed' : '') + '" type="button" data-select-pi="' + escapeAttr(pi.pi_id) + '">' +
-        '<div class="pi-prog-head"><strong>' + escapeHtml(pi.pi_no) + '</strong>' + statusChip(pi.status) + '</div>' +
-        '<span class="muted">' + escapeHtml(pi.customer_name) + '</span>' +
-        '<div class="pi-prog-bars">' +
-          '<div class="prog-row"><span>Kora</span><div class="prog-track"><div class="prog-fill greige" style="width:' + gPct + '%"></div></div><span>' + gPct + '%</span></div>' +
-          '<div class="prog-row"><span>Final</span><div class="prog-track"><div class="prog-fill final" style="width:' + pct + '%"></div></div><span>' + pct + '%</span></div>' +
-        '</div>' +
-        '<div class="pi-prog-foot">' +
-          (pi.delivery_date ? '<span class="pi-prog-date' + (isDelayed ? ' delayed' : '') + '">' + escapeHtml(pi.delivery_date) + '</span>' : '<span></span>') +
-          '<span class="text-button" style="margin-left: auto;">Update</span>' +
-        '</div>' +
-      '</button>';
-    }).join('') + '</div></div>';
-}
+
 
 function renderOrders() {
   const search = document.getElementById('orderSearch').value.trim().toLowerCase();
@@ -508,7 +539,10 @@ function renderPiDetail() {
 
   panel.innerHTML = '<div class="panel-heading">' +
     '<div><h2>' + escapeHtml(pi.pi_no) + '</h2><span class="muted">' + escapeHtml(pi.customer_name) + '</span></div>' +
-    statusChip(pi.status) +
+    '<div style="display:flex; gap:0.5rem; align-items:center">' +
+      statusChip(pi.status) +
+      '<button class="secondary-button" style="padding:0.5rem; min-height:auto" title="Archive PI" data-archive-pi="' + escapeAttr(pi.pi_id) + '">Archive</button>' +
+    '</div>' +
   '</div>' +
   colourBar +
   '<div class="pi-summary">' +
@@ -670,8 +704,11 @@ function renderGreigeForm(item) {
   '<details style="margin-top:12px; font-size:13px;"><summary class="muted">View Individual Receipts</summary>' +
   renderMiniList('Receipts', lots, function (lot) {
     const source = lot.source_type === 'Job worker' ? lot.job_worker_name : 'Machine ' + lot.machine_no;
+    const bal = lot.balance_weight !== undefined && lot.balance_weight !== '' 
+      ? number(lot.balance_weight) 
+      : Math.max(number(lot.weight_qty) - number(lot.dyeing_sent_weight), 0);
     return '<strong>' + escapeHtml(lot.greige_lot_no || '-') + '</strong><span>' +
-      formatNumber(lot.weight_qty) + ' ' + escapeHtml(lot.unit || 'Kg') + ' - bal ' + formatNumber(lot.balance_weight) + '</span>';
+      formatNumber(lot.weight_qty) + ' ' + escapeHtml(lot.unit || 'Kg') + ' - bal ' + formatNumber(bal) + '</span>';
   }) + '</details>';
 }
 
@@ -692,7 +729,12 @@ function renderDyeingForm(item) {
 
   const itemsHtml = colourGroupItems.map(function(cItem, index) {
     const koraLots = getGreigeLotsForGroup(cItem);
-    const availableKora = sum(koraLots, 'balance_weight');
+    const availableKora = koraLots.reduce(function(sum, lot) {
+      const bal = lot.balance_weight !== undefined && lot.balance_weight !== '' 
+        ? number(lot.balance_weight) 
+        : Math.max(number(lot.weight_qty) - number(lot.dyeing_sent_weight), 0);
+      return sum + bal;
+    }, 0);
     
     return '<div class="item-dyeing-row" style="border-top:1px solid var(--border-color); padding-top:12px; margin-top:12px;">' +
       '<h4>' + escapeHtml(cItem.fabric_name) + ' <span class="muted">(' + formatNumber(cItem.ordered_qty) + ' ' + escapeHtml(cItem.unit || 'Kg') + ')</span></h4>' +
@@ -747,33 +789,7 @@ function bindWorkflowForms() {
   }
 }
 
-async function handleCreatePi(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const pi = objectFromForm(form);
-  const items = Array.from(document.querySelectorAll('[data-item-editor]')).map(function (editor) {
-    return objectFromForm(editor);
-  }).filter(function (item) {
-    return item.fabric_name && item.colour && number(item.ordered_qty) > 0;
-  });
 
-  if (items.length === 0) {
-    showToast('Add at least one valid PI item.');
-    return;
-  }
-
-  await submitAction('createPi', { pi: pi, items: items }, function () {
-    form.reset();
-    document.getElementById('itemEditorList').innerHTML = '';
-    addItemEditor();
-    const savedPi = rows('PIs').find(function (record) {
-      return record.pi_no === pi.pi_no;
-    });
-    if (savedPi) state.selectedPiId = savedPi.pi_id;
-    renderOrders();
-    setView('orders');
-  });
-}
 
 async function handleYarnSubmit(event) {
   event.preventDefault();
@@ -912,6 +928,7 @@ function renderMasters() {
     'Masters_JobWorkers',
     'Masters_DyeingProcesses',
     'Masters_Addons',
+    'Masters_DyeingHouses',
   ];
 
   document.getElementById('masterList').innerHTML = visibleMasters.map(function (sheetName) {
@@ -1138,6 +1155,7 @@ function getMasterName(sheetName, record) {
   if (sheetName === 'Masters_JobWorkers') return record.job_worker_name;
   if (sheetName === 'Masters_DyeingProcesses') return record.process_name;
   if (sheetName === 'Masters_Addons') return record.addon_name;
+  if (sheetName === 'Masters_DyeingHouses') return record.dyeing_house_name;
   return '';
 }
 

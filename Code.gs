@@ -312,6 +312,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('PMS')
     .addItem('Setup PMS Sheet', 'setupPmsSheet')
+    .addItem('Sync Final Dashboard', 'syncFinalDashboard')
     .addItem('Import Sales PIs', 'importSalesPis')
     .addItem('Import Greige Lots', 'importGreigeLots')
     .addItem('Import Dyeing Lots', 'importDyeingLots')
@@ -1212,13 +1213,10 @@ function doPost(e) {
     switch (request.action) {
       case 'readAll':
         return jsonResponse_(readAll_());
-      case 'createPi':
-        return jsonResponse_(createPi_(request.payload || {}));
       case 'saveItemYarns':
         return jsonResponse_(saveItemYarns_(request.payload || {}));
       case 'saveGroupYarns':
         return jsonResponse_(saveGroupYarns_(request.payload || {}));
-      case 'addProductionLot':
       case 'addGreigeLot':
         return jsonResponse_(addGreigeLot_(request.payload || {}));
       case 'addDyeingLot':
@@ -1233,6 +1231,10 @@ function doPost(e) {
         return jsonResponse_(importGreigeLots_());
       case 'importDyeingLots':
         return jsonResponse_(importDyeingLots_());
+      case 'archivePi':
+        return jsonResponse_(archivePi_(request.payload || {}));
+      case 'syncFinalDashboard':
+        return jsonResponse_(syncFinalDashboard_());
       default:
         throw new Error('Unknown action: ' + request.action);
     }
@@ -1289,72 +1291,7 @@ function readAll_() {
   };
 }
 
-function createPi_(payload) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const now = new Date().toISOString();
-  const pi = payload.pi || {};
-  const items = payload.items || [];
 
-  if (!pi.pi_no) {
-    throw new Error('PI number is required.');
-  }
-
-  if (!pi.customer_name) {
-    throw new Error('Customer name is required.');
-  }
-
-  if (items.length === 0) {
-    throw new Error('At least one PI item is required.');
-  }
-
-  const piId = pi.pi_id || makeId_('PI');
-  const piRecord = {
-    pi_id: piId,
-    pi_no: pi.pi_no,
-    customer_id: pi.customer_id || '',
-    customer_name: pi.customer_name,
-    sales_manager: pi.sales_manager || '',
-    pi_date: pi.pi_date || today_(),
-    delivery_date: pi.delivery_date || '',
-    priority: pi.priority || 'Normal',
-    remarks: pi.remarks || '',
-    status: 'New',
-    created_at: now,
-    updated_at: now,
-  };
-
-  appendObject_(spreadsheet.getSheetByName('PIs'), piRecord);
-
-  items.forEach(function (item, index) {
-    const orderedQty = toNumber_(item.ordered_qty);
-    const piItemId = item.pi_item_id || makeId_('ITEM');
-    const itemRecord = {
-      pi_item_id: piItemId,
-      pi_id: piId,
-      pi_no: pi.pi_no,
-      line_no: index + 1,
-      fabric_name: item.fabric_name || '',
-      colour: item.colour || '',
-      ordered_qty: orderedQty,
-      unit: item.unit || 'Kg',
-      gsm: item.gsm || '',
-      width: item.width || '',
-      planned_qty: toNumber_(item.planned_qty),
-      greige_produced_qty: 0,
-      dyeing_sent_qty: 0,
-      dyeing_received_qty: 0,
-      production_balance: orderedQty,
-      dyeing_balance: 0,
-      final_balance: orderedQty,
-      status: 'New',
-      remarks: item.remarks || '',
-    };
-
-    appendObject_(spreadsheet.getSheetByName('PI_Items'), itemRecord);
-  });
-
-  return readAll_();
-}
 
 function saveItemYarns_(payload) {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -1596,8 +1533,16 @@ function splitDyeingLotFifo_(dyeingLotsSheet, item, lotPayload) {
   const totalReceivedWeight = toNumber_(lotPayload.received_weight);
   const totalReceivedRolls = toNumber_(lotPayload.received_rolls);
 
-  let availableLots = getGreigeLotsForFabricGroup_(item).filter(function(l) {
-    return toNumber_(l.balance_weight) > 0;
+  let availableLots = getGreigeLotsForFabricGroup_(item).map(function(l) {
+    l._calculated_balance = l.balance_weight !== undefined && l.balance_weight !== '' 
+      ? toNumber_(l.balance_weight) 
+      : Math.max(toNumber_(l.weight_qty) - toNumber_(l.dyeing_sent_weight), 0);
+    l._calculated_balance_rolls = l.balance_rolls !== undefined && l.balance_rolls !== ''
+      ? toNumber_(l.balance_rolls)
+      : Math.max(toNumber_(l.rolls) - toNumber_(l.dyeing_sent_rolls), 0);
+    return l;
+  }).filter(function(l) {
+    return l._calculated_balance > 0;
   });
   
   // Sort by received date (FIFO)
@@ -1605,7 +1550,7 @@ function splitDyeingLotFifo_(dyeingLotsSheet, item, lotPayload) {
     return new Date(a.received_date) - new Date(b.received_date); 
   });
 
-  const totalAvailable = availableLots.reduce(function(sum, l) { return sum + toNumber_(l.balance_weight); }, 0);
+  const totalAvailable = availableLots.reduce(function(sum, l) { return sum + l._calculated_balance; }, 0);
   
   if (totalSentWeight > 0 && totalAvailable < totalSentWeight) {
     throw new Error('Insufficient Kora stock for ' + item.fabric_name + '. Available: ' + totalAvailable + 'kg, Requested: ' + totalSentWeight + 'kg.');
@@ -1617,8 +1562,8 @@ function splitDyeingLotFifo_(dyeingLotsSheet, item, lotPayload) {
   // Split across lots
   for (let i = 0; i < availableLots.length && remainingWeight > 0; i++) {
     const lot = availableLots[i];
-    const takeWeight = Math.min(remainingWeight, toNumber_(lot.balance_weight));
-    const takeRolls = remainingRolls > 0 ? Math.min(remainingRolls, toNumber_(lot.balance_rolls)) : 0;
+    const takeWeight = Math.min(remainingWeight, lot._calculated_balance);
+    const takeRolls = remainingRolls > 0 ? Math.min(remainingRolls, lot._calculated_balance_rolls) : 0;
     
     // Pro-rate received weight and rolls for this split if applicable
     const splitRatio = totalSentWeight > 0 ? (takeWeight / totalSentWeight) : 1;
@@ -1975,6 +1920,12 @@ function seedDefaultOptions_(spreadsheet) {
     ['AD-002', 'Softener', 'Active', ''],
     ['AD-003', 'Finish', 'Active', ''],
   ]);
+
+  seedRows_(spreadsheet.getSheetByName('Masters_DyeingHouses'), [
+    ['DH-001', 'A-One Dyeing', '9876543210', 'Indus Area', 'Active', ''],
+    ['DH-002', 'Standard Dyeing', '9876543211', 'Textile Hub', 'Active', ''],
+    ['DH-003', 'Prime Dyeing', '9876543212', 'Industrial Estate', 'Active', ''],
+  ]);
 }
 
 function seedRows_(sheet, rows) {
@@ -2157,4 +2108,135 @@ function jsonResponse_(payload) {
   return ContentService
     .createTextOutput(JSON.stringify(payload))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** ── Final Dashboard Sync ── **/
+
+function syncFinalDashboard() {
+  try {
+    syncFinalDashboard_();
+    SpreadsheetApp.getUi().alert('Final Dashboard synced successfully.');
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Sync failed: ' + e.message);
+  }
+}
+
+function syncFinalDashboard_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const piSheet = spreadsheet.getSheetByName('PIs');
+  const itemSheet = spreadsheet.getSheetByName('PI_Items');
+  const greigeSheet = spreadsheet.getSheetByName('Greige_Lots');
+  const dyeingSheet = spreadsheet.getSheetByName('Dyeing_Lots');
+  
+  const pis = getSheetObjects_(piSheet);
+  const items = getSheetObjects_(itemSheet);
+  const greigeLots = getSheetObjects_(greigeSheet);
+  const dyeingLots = getSheetObjects_(dyeingSheet);
+  
+  const reportData = [];
+  const headers = [
+    'PI No', 'Customer', 'Fabric', 'Colour', 'Ordered Qty', 
+    'Kora Received', 'Sent to Dyeing', 'Received from Dyeing', 
+    'Loss', 'Current Status'
+  ];
+  
+  items.forEach(function(item) {
+    const pi = pis.find(function(p) { return p.pi_id === item.pi_id; }) || {};
+    const itemGreige = greigeLots.filter(function(l) { 
+      return l.pi_id === item.pi_id || (l.pi_no && item.pi_no && String(l.pi_no).trim() === String(item.pi_no).trim());
+    });
+    const itemDyeing = dyeingLots.filter(function(l) { return l.pi_item_id === item.pi_item_id; });
+    
+    const koraReceived = itemGreige.reduce(function(sum, l) { return sum + toNumber_(l.weight_qty); }, 0);
+    const sentToDyeing = itemDyeing.reduce(function(sum, l) { return sum + toNumber_(l.sent_weight); }, 0);
+    const receivedFromDyeing = itemDyeing.reduce(function(sum, l) { return sum + toNumber_(l.received_weight); }, 0);
+    const loss = itemDyeing.reduce(function(sum, l) { return sum + toNumber_(l.loss_weight); }, 0);
+    
+    reportData.push([
+      item.pi_no || pi.pi_no || '',
+      pi.customer_name || '',
+      item.fabric_name || '',
+      item.colour || '',
+      item.ordered_qty || 0,
+      koraReceived,
+      sentToDyeing,
+      receivedFromDyeing,
+      loss,
+      item.status || 'New'
+    ]);
+  });
+  
+  let reportSheet = spreadsheet.getSheetByName('Final_Dashboard');
+  if (!reportSheet) {
+    reportSheet = spreadsheet.insertSheet('Final_Dashboard');
+  }
+  
+  reportSheet.clear();
+  reportSheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#f3f3f3');
+  if (reportData.length > 0) {
+    reportSheet.getRange(2, 1, reportData.length, headers.length).setValues(reportData);
+  }
+  reportSheet.setFrozenRows(1);
+  reportSheet.autoResizeColumns(1, headers.length);
+  
+  return { ok: true };
+}
+
+/** ── PI Archiving ── **/
+
+function archivePi_(payload) {
+  const piId = payload.pi_id;
+  if (!piId) throw new Error('PI ID is required for archiving.');
+  
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // Find all item IDs related to this PI
+  const items = getSheetObjects_(spreadsheet.getSheetByName('PI_Items')).filter(function(i) { 
+    return i.pi_id === piId; 
+  });
+  const piItemIds = items.map(function(i) { return i.pi_item_id; });
+  
+  const archiveSheets = {
+    'PIs': 'Archive_PIs',
+    'PI_Items': 'Archive_PI_Items',
+    'Item_Yarns': 'Archive_Item_Yarns',
+    'Greige_Lots': 'Archive_Greige_Lots',
+    'Dyeing_Lots': 'Archive_Dyeing_Lots'
+  };
+  
+  for (const activeName in archiveSheets) {
+    const archiveName = archiveSheets[activeName];
+    const activeSheet = spreadsheet.getSheetByName(activeName);
+    if (!activeSheet) continue;
+    
+    const archiveSheet = getOrCreateSheet_(spreadsheet, archiveName);
+    const objects = getSheetObjects_(activeSheet);
+    const activeHeaders = getHeaders_(activeSheet);
+    const piIdIndex = activeHeaders.indexOf('pi_id');
+    const piItemIdIndex = activeHeaders.indexOf('pi_item_id');
+    
+    const toArchive = objects.filter(function(obj) {
+      if (obj.pi_id === piId) return true;
+      if (obj.pi_item_id && piItemIds.indexOf(obj.pi_item_id) !== -1) return true;
+      return false;
+    });
+    
+    if (toArchive.length > 0) {
+      ensureHeaders_(archiveSheet, activeHeaders);
+      toArchive.forEach(function(obj) {
+        appendObject_(archiveSheet, obj);
+      });
+      
+      const data = activeSheet.getDataRange().getValues();
+      for (let i = data.length - 1; i >= 1; i--) {
+        const rowPiId = piIdIndex !== -1 ? data[i][piIdIndex] : null;
+        const rowItemId = piItemIdIndex !== -1 ? data[i][piItemIdIndex] : null;
+        if (rowPiId === piId || (rowItemId && piItemIds.indexOf(rowItemId) !== -1)) {
+          activeSheet.deleteRow(i + 1);
+        }
+      }
+    }
+  }
+  
+  return { ok: true, message: 'PI ' + piId + ' archived successfully.' };
 }
